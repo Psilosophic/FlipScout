@@ -12,16 +12,11 @@ import {
   MapPin,
   WifiOff,
   Radio,
-  LogIn,
-  LogOut,
-  User,
-  Cpu,
-  Globe,
+  ExternalLink,
   Info,
 } from "lucide-react";
 import { ListingCard } from "@/components/ListingCard";
 import { WatchlistPanel } from "@/components/WatchlistPanel";
-import { NellisLoginModal } from "@/components/NellisLoginModal";
 import type { AuctionListing } from "@/lib/types";
 import { NELLIS_LOCATIONS, DEFAULT_LOCATION } from "@/lib/nellis-constants";
 
@@ -43,13 +38,6 @@ export default function FlipScoutPage() {
   const [loading, setLoading] = useState(false);
   const [isRealData, setIsRealData] = useState(false);
 
-  // Playwright vs. basic scraper toggle
-  const [usePlaywright, setUsePlaywright] = useState(false);
-
-  // Nellis auth session
-  const [nellisUser, setNellisUser] = useState<string | null>(null);
-  const [showLoginModal, setShowLoginModal] = useState(false);
-
   const [watchedIds, setWatchedIds] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set();
     try {
@@ -61,22 +49,11 @@ export default function FlipScoutPage() {
   });
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
 
-  // Check session on mount
-  useEffect(() => {
-    fetch("/api/nellis-login")
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.loggedIn) setNellisUser(data.displayName);
-      })
-      .catch(() => {});
-  }, []);
-
   const fetchListings = useCallback(async () => {
     setLoading(true);
     try {
-      const endpoint = usePlaywright ? "/api/scrape-live" : "/api/scrape";
       const params = new URLSearchParams({ q: query, category, sort, location });
-      const res = await fetch(`${endpoint}?${params}`);
+      const res = await fetch(`/api/scrape?${params}`);
       const data = await res.json();
       setListings(data.listings ?? []);
       setIsRealData(data.isRealData ?? false);
@@ -86,7 +63,7 @@ export default function FlipScoutPage() {
     } finally {
       setLoading(false);
     }
-  }, [query, category, sort, location, usePlaywright]);
+  }, [query, category, sort, location]);
 
   useEffect(() => {
     fetchListings();
@@ -103,11 +80,6 @@ export default function FlipScoutPage() {
       return next;
     });
   }, []);
-
-  async function handleLogout() {
-    await fetch("/api/nellis-login", { method: "DELETE" });
-    setNellisUser(null);
-  }
 
   const watchedListings = listings.filter((l) => watchedIds.has(l.id));
   const hotDeals = listings.filter((l) => l.dealScore >= 75).length;
@@ -139,20 +111,6 @@ export default function FlipScoutPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Playwright toggle */}
-            <button
-              onClick={() => setUsePlaywright((v) => !v)}
-              title={usePlaywright ? "Using Playwright (full browser) — click to switch to fast scraper" : "Using fast HTML scraper — click to enable Playwright for 100% reliability"}
-              className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                usePlaywright
-                  ? "text-primary border-primary/40 bg-primary/10"
-                  : "text-muted-foreground border-border hover:border-primary/30 hover:text-foreground"
-              }`}
-            >
-              {usePlaywright ? <Cpu className="w-3 h-3" /> : <Globe className="w-3 h-3" />}
-              {usePlaywright ? "Playwright" : "Fast Scraper"}
-            </button>
-
             {/* Live data indicator */}
             <div
               className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${
@@ -180,31 +138,16 @@ export default function FlipScoutPage() {
               <span className="hidden sm:inline">Refresh</span>
             </button>
 
-            {/* Nellis account */}
-            {nellisUser ? (
-              <div className="flex items-center gap-1.5">
-                <div className="hidden sm:flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-2.5 py-1.5">
-                  <User className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-xs text-emerald-400 font-medium">{nellisUser}</span>
-                </div>
-                <button
-                  onClick={handleLogout}
-                  title="Sign out of Nellis"
-                  className="flex items-center gap-1.5 border border-border rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground hover:border-red-500/40 hover:text-red-400 transition-colors"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Sign Out</span>
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setShowLoginModal(true)}
-                className="flex items-center gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Sign In</span>
-              </button>
-            )}
+            {/* Open Nellis */}
+            <a
+              href="https://www.nellisauction.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Open Nellis</span>
+            </a>
           </div>
         </div>
       </header>
@@ -234,24 +177,6 @@ export default function FlipScoutPage() {
           </div>
         )}
 
-        {/* Session notice when not logged in */}
-        {!nellisUser && (
-          <div className="mb-5 flex items-center justify-between gap-3 bg-primary/5 border border-primary/20 rounded-xl px-4 py-3">
-            <div className="flex items-center gap-2.5">
-              <LogIn className="w-4 h-4 text-primary flex-shrink-0" />
-              <p className="text-xs text-muted-foreground">
-                <span className="text-foreground font-medium">Sign in to your Nellis account</span>{" "}
-                to open listings as yourself — clicking &quot;Bid Now&quot; will take you straight to the auction already authenticated.
-              </p>
-            </div>
-            <button
-              onClick={() => setShowLoginModal(true)}
-              className="flex-shrink-0 text-xs text-primary font-semibold hover:underline"
-            >
-              Sign In
-            </button>
-          </div>
-        )}
 
         {/* Stats row */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
@@ -397,7 +322,6 @@ export default function FlipScoutPage() {
                       listing={listing}
                       isWatched={watchedIds.has(listing.id)}
                       onToggleWatch={toggleWatch}
-                      isAuthenticated={!!nellisUser}
                     />
                   ))}
                 </div>
@@ -412,13 +336,6 @@ export default function FlipScoutPage() {
         </div>
       </main>
 
-      {/* Login modal */}
-      {showLoginModal && (
-        <NellisLoginModal
-          onClose={() => setShowLoginModal(false)}
-          onLoginSuccess={(name) => setNellisUser(name)}
-        />
-      )}
     </div>
   );
 }

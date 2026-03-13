@@ -20,14 +20,12 @@ interface ListingCardProps {
   listing: AuctionListing;
   isWatched: boolean;
   onToggleWatch: (id: string) => void;
-  isAuthenticated?: boolean;
 }
 
 export function ListingCard({
   listing,
   isWatched,
   onToggleWatch,
-  isAuthenticated = false,
 }: ListingCardProps) {
   const [showCalc, setShowCalc] = useState(false);
   const [showRepairIntel, setShowRepairIntel] = useState(false);
@@ -169,15 +167,10 @@ export function ListingCard({
                 href={listing.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                title={isAuthenticated ? "Opens as your Nellis account" : "Sign in to FlipScout to open as your account"}
-                className={`flex items-center gap-1.5 flex-1 justify-center text-xs font-semibold rounded-lg py-2 transition-colors ${
-                  isAuthenticated
-                    ? "bg-primary hover:bg-primary/90 text-primary-foreground"
-                    : "bg-primary/60 hover:bg-primary/70 text-primary-foreground"
-                }`}
+                className="flex items-center gap-1.5 flex-1 justify-center text-xs font-semibold rounded-lg py-2 transition-colors bg-primary hover:bg-primary/90 text-primary-foreground"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
-                {isAuthenticated ? "Bid Now" : "View"}
+                View on Nellis
               </a>
             </div>
           </div>
