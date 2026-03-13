@@ -17,7 +17,6 @@ import {
   User,
   Cpu,
   Globe,
-  Rocket,
   Info,
 } from "lucide-react";
 import { ListingCard } from "@/components/ListingCard";
@@ -219,21 +218,19 @@ export default function FlipScoutPage() {
               <div>
                 <p className="text-xs font-semibold text-amber-400">Demo Mode — showing sample listings</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Real Nellis scraping requires a deployed server. The preview environment can&apos;t
-                  run the headless browser needed to pull live data.{" "}
-                  <span className="text-foreground font-medium">Deploy to Vercel to activate live scraping.</span>
+                  The scraper couldn&apos;t reach Nellis or returned no results.
+                  This can happen if Nellis is temporarily blocking requests.{" "}
+                  <span className="text-foreground font-medium">Try refreshing or changing the search query.</span>
                 </p>
               </div>
             </div>
-            <a
-              href="https://vercel.com/new"
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              onClick={fetchListings}
               className="flex-shrink-0 flex items-center gap-1.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 text-xs font-semibold rounded-lg px-3 py-2 transition-colors whitespace-nowrap"
             >
-              <Rocket className="w-3.5 h-3.5" />
-              Deploy to Vercel
-            </a>
+              <RefreshCw className="w-3.5 h-3.5" />
+              Retry
+            </button>
           </div>
         )}
 

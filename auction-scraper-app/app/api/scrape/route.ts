@@ -18,23 +18,51 @@ function calcDealScore(
   return Math.max(0, Math.round(raw));
 }
 
-// ─── Parse dollar string → number ("$1,234.56" → 1234.56) ───────────────────
-function parseDollar(str: string): number {
-  const cleaned = str.replace(/[^0-9.]/g, "");
-  return parseFloat(cleaned) || 0;
+// ─── Fetch Nellis search page HTML ────────────────────────────────────────────
+// Nellis sometimes returns an empty product list (load-balancer / bot detection).
+// We retry once if the first attempt returns 0 products.
+const FETCH_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+async function fetchNellisProducts(url: string): Promise<any[]> {
+  const res = await fetch(url, {
+    headers: FETCH_HEADERS,
+    next: { revalidate: 0 },
+  });
+  if (!res.ok) {
+    console.error(`[FlipScout] Nellis fetch failed: ${res.status} ${url}`);
+    return [];
+  }
+  const html = await res.text();
+  const ctxIdx = html.indexOf("__remixContext");
+  if (ctxIdx === -1) return [];
+
+  const startBrace = html.indexOf("{", ctxIdx);
+  let depth = 0;
+  let endBrace = startBrace;
+  for (let i = startBrace; i < html.length; i++) {
+    if (html[i] === "{") depth++;
+    else if (html[i] === "}") depth--;
+    if (depth === 0) { endBrace = i; break; }
+  }
+  const remixData = JSON.parse(html.substring(startBrace, endBrace + 1));
+  return remixData?.state?.loaderData?.["routes/search"]?.products ?? [];
 }
 
 // ─── Real Nellis scraper ──────────────────────────────────────────────────────
-// Fetches Nellis' public search page (server-side, no CORS issues) and parses
-// the HTML for listing cards. Nellis renders their catalog server-side in HTML
-// so we can extract data without a headless browser.
+// Nellis uses Remix. Product data is embedded in window.__remixContext in the
+// server-rendered HTML, with prices, bids, photos, grade info, and close times.
 async function scrapeNellis(
   location: string,
   query: string,
   category: string,
   sort: string
 ): Promise<AuctionListing[]> {
-  // Map our sort values to Nellis URL params
   const sortMap: Record<string, string> = {
     score: "CurrentPrice&sortOrder=asc",
     profit: "EstRetail&sortOrder=desc",
@@ -45,227 +73,115 @@ async function scrapeNellis(
   const nellisSortStr = sortMap[sort] || "CurrentPrice&sortOrder=asc";
   const [sortBy, sortOrderStr] = nellisSortStr.split("&sortOrder=");
 
-  // Build the URL. Nellis uses ?location= (plain city string, we let URLSearchParams encode it).
   const baseUrl = "https://www.nellisauction.com/search";
   const params = new URLSearchParams();
-  if (location) params.set("location", location);
   if (query) params.set("q", query);
   params.set("sortBy", sortBy);
   params.set("sortOrder", sortOrderStr);
-  // Nellis quality ratings: 1=For Parts/Not Working/Missing, filter for damaged items
-  // missingParts=true is not a real param — we post-filter on keywords instead
   const url = `${baseUrl}?${params.toString()}`;
 
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      Referer: "https://www.nellisauction.com/",
-    },
-    next: { revalidate: 0 }, // always fresh
-  });
-
-  if (!res.ok) {
-    console.error(`[FlipScout] Nellis fetch failed: ${res.status} ${url}`);
+  // Fetch with one retry — Nellis load balancers sometimes return empty pages
+  let products = await fetchNellisProducts(url);
+  if (products.length === 0) {
+    console.log("[FlipScout] First fetch returned 0 products, retrying...");
+    products = await fetchNellisProducts(url);
+  }
+  if (products.length === 0) {
+    console.error("[FlipScout] No products after retry");
     return [];
   }
 
-  const html = await res.text();
-
-  // ── HTML parsing ──────────────────────────────────────────────────────────
-  // Nellis renders listing cards as <a> elements. We use regex to pull data
-  // out of the rendered HTML since we don't have a DOM parser on the edge.
   const listings: AuctionListing[] = [];
+  for (const p of products.slice(0, 80)) {
+    const title: string = p.title ?? "";
+    const currentBid: number = p.currentPrice ?? 0;
+    const retailValue: number = p.retailPrice ?? 0;
+    const buyersPremium = 15; // Nellis standard
+    const bids: number = p.bidCount ?? 0;
+    const id: string = String(p.id ?? Math.random());
+    const lotNumber: string = p.inventoryNumber ?? String(p.id ?? "");
 
-  // Extract __NEXT_DATA__ JSON blob — Nellis injects all listing data here
-  const nextDataMatch = html.match(
-    /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
-  );
+    // Photos — array of {url, name, fullPath}
+    const imageUrl: string = p.photos?.[0]?.url ?? "";
 
-  if (nextDataMatch) {
-    try {
-      const nextData = JSON.parse(nextDataMatch[1]);
-      // Navigate to the products array — path varies by Nellis build
-      const pageProps =
-        nextData?.props?.pageProps ||
-        nextData?.props?.initialProps?.pageProps ||
-        {};
-      const products: any[] =
-        pageProps?.products ||
-        pageProps?.searchResults?.products ||
-        pageProps?.initialData?.products ||
-        pageProps?.data?.products ||
-        [];
+    // Product URL
+    const titleSlug = title.replace(/[^a-zA-Z0-9]+/g, "-").replace(/-+$/, "");
+    const fullUrl = `https://www.nellisauction.com/p/${titleSlug}/${p.id}`;
 
-      for (const p of products.slice(0, 60)) {
-        const title: string = p.title || p.name || p.productName || "";
-        const currentBid: number =
-          p.currentPrice ?? p.currentBid ?? p.price ?? 0;
-        const retailValue: number =
-          p.estimatedRetail ?? p.retailValue ?? p.estRetail ?? p.retail ?? 0;
-        const buyersPremium: number = p.buyersPremium ?? p.buyerPremium ?? 15;
-        const bids: number = p.bidCount ?? p.bids ?? p.numberOfBids ?? 0;
-        const lotNumber: string = String(
-          p.lotNumber ?? p.lot ?? p.id ?? p.productId ?? ""
-        );
-        const id: string = String(p.id ?? p.productId ?? p.lotNumber ?? Math.random());
-        const imageUrl: string =
-          p.imageUrl ?? p.image ?? p.thumbnail ?? p.photo ?? "";
-        const productUrl: string = p.url ?? p.productUrl ?? "";
-        const fullUrl = productUrl.startsWith("http")
-          ? productUrl
-          : `https://www.nellisauction.com${productUrl}`;
+    // Location from the product's location object
+    const locName: string =
+      p.location?.name ?? p.location?.city ?? location;
 
-        // Condition / quality labels
-        const qualityLabels: string[] = [
-          ...(p.qualityRatings ?? p.qualityLabels ?? p.conditions ?? []),
-          p.condition ?? "",
-          p.qualityRating ?? "",
-        ]
-          .filter(Boolean)
-          .map((s: string) => s.toLowerCase().trim());
-        const condition = qualityLabels.join(", ") || "Unknown";
+    // Condition from grade object
+    const grade = p.grade ?? {};
+    const conditionParts: string[] = [];
+    if (grade.conditionType?.description)
+      conditionParts.push(grade.conditionType.description);
+    if (grade.damageType?.description && grade.damageType.description !== "None")
+      conditionParts.push(grade.damageType.description);
+    if (grade.functionalType?.description === "No")
+      conditionParts.push("Not Working");
+    if (grade.missingPartsType?.description === "Yes")
+      conditionParts.push("Missing Parts");
+    if (grade.packageType?.description === "No")
+      conditionParts.push("No Packaging");
+    const condition = conditionParts.join(", ") || "Unknown";
 
-        // Time remaining
-        const endsAt: string =
-          p.endsAt ??
-          p.endTime ??
-          p.auctionEndTime ??
-          p.endDate ??
-          new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString();
+    // End time — closeTime is {__type: "Date", value: "..."}
+    const endsAt: string =
+      p.closeTime?.value ??
+      new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString();
 
-        // Category mapping
-        const rawCategory: string =
-          p.category ?? p.categoryName ?? p.productCategory ?? "";
+    // Damage keyword detection across title + condition
+    const combined = `${title} ${condition}`.toLowerCase();
+    const foundKeywords = DAMAGE_KEYWORDS.filter((kw) =>
+      combined.includes(kw.toLowerCase())
+    );
 
-        // Damage keyword detection across title + condition
-        const combined = `${title} ${condition}`.toLowerCase();
-        const foundKeywords = DAMAGE_KEYWORDS.filter((kw) =>
-          combined.includes(kw.toLowerCase())
-        );
+    // Only include listings with at least 1 damage keyword (unless searching)
+    if (foundKeywords.length === 0 && !query) continue;
 
-        // Only include listings with at least 1 damage keyword
-        if (foundKeywords.length === 0 && !query) continue;
-
-        // Category filter
-        if (
-          category &&
-          category !== "All" &&
-          !rawCategory.toLowerCase().includes(category.toLowerCase()) &&
-          !title.toLowerCase().includes(category.toLowerCase())
-        ) {
-          continue;
-        }
-
-        const score = calcDealScore(
-          currentBid,
-          retailValue,
-          foundKeywords.length,
-          buyersPremium
-        );
-        const totalCost = currentBid * (1 + buyersPremium / 100);
-        const estimatedRepairCost = retailValue * 0.12;
-        const estimatedResaleValue = retailValue * 0.65;
-        const estimatedProfit = Math.round(
-          estimatedResaleValue - totalCost - estimatedRepairCost
-        );
-
-        listings.push({
-          id,
-          title,
-          currentBid,
-          retailValue,
-          buyersPremium,
-          endsAt,
-          imageUrl,
-          url: fullUrl,
-          location: p.location ?? p.locationName ?? decodeURIComponent(location),
-          condition,
-          damageKeywords: foundKeywords,
-          dealScore: score,
-          estimatedProfit,
-          lotNumber,
-          category: rawCategory || "General",
-          bids,
-          isRealData: true,
-        });
-      }
-    } catch (e) {
-      console.error("[FlipScout] Failed to parse __NEXT_DATA__:", e);
+    // Category filter (use title since Nellis doesn't include category in product data)
+    if (
+      category &&
+      category !== "All" &&
+      !title.toLowerCase().includes(category.toLowerCase())
+    ) {
+      continue;
     }
-  }
 
-  // Fallback: try regex-based HTML parsing if __NEXT_DATA__ didn't yield results
-  if (listings.length === 0) {
-    // Match listing title blocks from the rendered HTML
-    const titleMatches = [
-      ...html.matchAll(/<h6[^>]*>([\s\S]*?)<\/h6>/gi),
-    ];
-    const priceMatches = [
-      ...html.matchAll(/CURRENT PRICE[\s\S]*?\$([\d,]+\.?\d*)/gi),
-    ];
-    const retailMatches = [
-      ...html.matchAll(/EST\. RETAIL[\s\S]*?\$([\d,]+\.?\d*)/gi),
-    ];
-    const bidsMatches = [...html.matchAll(/BIDS[\s\S]*?(\d+)\s*BUYER/gi)];
-    const conditionMatches = [
-      ...html.matchAll(/(?:Missing Parts|Untested|Partial Set|For Parts|As Is|Damaged|Broken|Unknown if Missing Parts)/gi),
-    ];
+    const score = calcDealScore(
+      currentBid,
+      retailValue,
+      foundKeywords.length,
+      buyersPremium
+    );
+    const totalCost = currentBid * (1 + buyersPremium / 100);
+    const estimatedRepairCost = retailValue * 0.12;
+    const estimatedResaleValue = retailValue * 0.65;
+    const estimatedProfit = Math.round(
+      estimatedResaleValue - totalCost - estimatedRepairCost
+    );
 
-    const count = Math.min(titleMatches.length, priceMatches.length, 40);
-    for (let i = 0; i < count; i++) {
-      const title = titleMatches[i]?.[1]?.replace(/<[^>]+>/g, "").trim() ?? "";
-      if (!title) continue;
-
-      const currentBid = parseDollar(priceMatches[i]?.[1] ?? "0");
-      const retailValue = parseDollar(retailMatches[i]?.[1] ?? "0");
-      const bids = parseInt(bidsMatches[i]?.[1] ?? "0") || 0;
-      const condition = conditionMatches[i]?.[0] ?? "Unknown";
-      const combined = `${title} ${condition}`.toLowerCase();
-      const foundKeywords = DAMAGE_KEYWORDS.filter((kw) =>
-        combined.includes(kw.toLowerCase())
-      );
-
-      if (foundKeywords.length === 0 && !query) continue;
-      if (
-        category &&
-        category !== "All" &&
-        !title.toLowerCase().includes(category.toLowerCase())
-      ) continue;
-
-      const id = `nellis-${i}-${Date.now()}`;
-      const buyersPremium = 15;
-      const score = calcDealScore(currentBid, retailValue, foundKeywords.length, buyersPremium);
-      const totalCost = currentBid * (1 + buyersPremium / 100);
-      const estimatedRepairCost = retailValue * 0.12;
-      const estimatedResaleValue = retailValue * 0.65;
-      const estimatedProfit = Math.round(
-        estimatedResaleValue - totalCost - estimatedRepairCost
-      );
-
-      listings.push({
-        id,
-        title,
-        currentBid,
-        retailValue,
-        buyersPremium,
-        endsAt: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
-        imageUrl: "",
-        url: `https://www.nellisauction.com/search?location=${encodeURIComponent(location)}`,
-        location: location,
-        condition,
-        damageKeywords: foundKeywords,
-        dealScore: score,
-        estimatedProfit,
-        lotNumber: String(i + 1),
-        category: "General",
-        bids,
-        isRealData: true,
-      });
-    }
+    listings.push({
+      id,
+      title,
+      currentBid,
+      retailValue,
+      buyersPremium,
+      endsAt,
+      imageUrl,
+      url: fullUrl,
+      location: locName,
+      condition,
+      damageKeywords: foundKeywords,
+      dealScore: score,
+      estimatedProfit,
+      lotNumber,
+      category: "General",
+      bids,
+      isRealData: true,
+    });
   }
 
   return listings;
